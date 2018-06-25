@@ -40,8 +40,8 @@ def find_dir(work_dir=True):
                 exit_flag = False
     else:
         main_data_dir = "./"
-    uwish2_name = input("Enter filename of the UWISH2 data:\n> ")
-    ukidss_name = input("Enter the filename of the UKIDSS GPS data:\n> ")
+    uwish2_name = input("\nEnter filename of the UWISH2 data:\n> ")
+    ukidss_name = input("\nEnter the filename of the UKIDSS GPS data:\n> ")
     uwish2_path = main_data_dir + uwish2_name
     ukidss_path = main_data_dir + ukidss_name
     return uwish2_path, ukidss_path
@@ -93,7 +93,7 @@ def read_data(uwish2_filename, ukidss_filename, start_pos_uwish2,
     return uwish2_data, ukidss_data
 
 
-def source_match(uwish2, ukidss):
+def source_match(uwish2, ukidss, work_dir):
     """
     """
     print("\nSources will be matched with objects within a 1 arcsecond region "
@@ -104,7 +104,7 @@ def source_match(uwish2, ukidss):
     n_sources_ukidss = ukidss.shape[0]
     deg_limit = 1/3600
     k_match = 0.5
-    cand_coords = input("Coordinates of potential HPM object from UWISH2, "
+    cand_coords = input("\nCoordinates of potential HPM object from UWISH2, "
                         "separated by a comma:\n> ")
     cand_coords = np.array(cand_coords.replace(",", "").split(), dtype=float)
     cand_H2 = uwish2[uwish2[:, 0] == cand_coords[0], 3]
@@ -164,14 +164,14 @@ def source_match(uwish2, ukidss):
         return uwish2_match, ukidss_match, cand_coords
     else:
         print("\nFAIL: A match was not found for the potential HPM object.")
-        restart()
+        restart(work_dir)
     return
 
 
 def calc_PM(uwish2, ukidss, colour_correct=False):
     """
     """
-    uwish2_epoch = float(input("Enter the date of the UWISH2 data:\n>  "))
+    uwish2_epoch = float(input("\nEnter the date of the UWISH2 data:\n>  "))
     ukidss_epoch = ukidss[0, 3]
     epochs = np.array([uwish2_epoch, ukidss_epoch])
     d_time = uwish2_epoch - ukidss_epoch
@@ -187,6 +187,16 @@ def calc_PM(uwish2, ukidss, colour_correct=False):
                                                  pm_RA_median)
     pm_magnitude = np.sqrt(pm_RA ** 2 + pm_DEC ** 2)
     pm = np.array([pm_RA, pm_DEC, pm_magnitude]).T
+    # Remove any objects with proper motion 1 std dev above or below the mean
+    # and then calculate the std dev again and use this as the std dev of the
+    # data set
+    pm_mag_std_dev = np.std(pm[:, 2])
+    pm_rm_outlier = np.zeros((1, 3))
+    for i in range(pm.shape[0]):
+        if -pm_mag_std_dev < pm[i, 2] < pm_mag_std_dev:
+            pm_rm_outlier = np.vstack([pm_rm_outlier, pm[i, :]])
+    pm_rm_outlier = np.delete(pm_rm_outlier, 0, 0)
+    pm_mag_err = np.std(pm_rm_outlier[:, 2])
     # Remove objects due to their colour -- this is due to reddencing
     # as well as objects having crap values/a false colour as they are
     # likely noise/false detections or have been influenced by noise
@@ -203,20 +213,25 @@ def calc_PM(uwish2, ukidss, colour_correct=False):
         for i in range(ukidss.shape[0]):
             if pm_magnitude[i] < pm_cutoff:
                 H_K_colour = ukidss[i, 6] - ukidss[i, 8]
+                J_H_colour = ukidss[i, 4] - ukidss[i, 6]
                 if 0 < H_K_colour < 0.7:
                     reddening_inter = x_coeff * H_K_colour + upper_inter
                     reddening_no_inter = x_coeff * H_K_colour
-                    if reddening_no_inter < H_K_colour < reddening_inter:
+                    if reddening_no_inter < J_H_colour < reddening_inter:
                         uwish2_fix = np.vstack([uwish2_fix, uwish2[i, :]])
                         ukidss_fix = np.vstack([ukidss_fix, ukidss[i, :]])
-                        pm_fix = np.vsatck([pm_fix, pm[i, :]])
+                        pm_fix = np.vstack([pm_fix, pm[i, :]])
+        n_objects_pre_colour = uwish2.shape[0]
         uwish2 = np.delete(uwish2_fix, 0, 0)
         ukidss = np.delete(ukidss_fix, 0, 0)
         pm = np.delete(pm_fix, 0, 0)
-    return uwish2, ukidss, pm, epochs
+        n_objects_removed = n_objects_pre_colour - uwish2.shape[0]
+        print("\nINFO: {} objects removed due to reddening limitations."
+              .format(n_objects_removed))
+    return uwish2, ukidss, pm, pm_mag_err, epochs
 
 
-def output_PM(uwish2, ukidss, pm, cand_coords, epochs):
+def output_PM(uwish2, ukidss, pm, pm_mag_err, cand_coords, epochs):
     """
     """
     # Write some stuff out about the potential HPM candidate
@@ -227,13 +242,28 @@ def output_PM(uwish2, ukidss, pm, cand_coords, epochs):
                                           float(pm[cand_index, 1]),
                                           float(pm[cand_index, 2])))
     print("----------------------------------------------------------")
-    # Graph the final output
+    # Record any objects > 3 sigma from the mean as these are unlikely to be
+    # HPM objects due to the fact that HPM objects are rare, thus could require
+    # further investigation
     pm_mag_std_dev = np.std(pm[:, 2])
+    uwish2_out = np.zeros((1, 4))
+    ukidss_out = np.zeros((1, 10))
+    pm_out = np.zeros((1, 3))
+    for i in range(pm.shape[0]):
+        if pm[i, 2] > 3 * pm_mag_std_dev:
+            uwish2_out = np.vstack([uwish2_out, uwish2[i, :]])
+            ukidss_out = np.vstack([ukidss_out, ukidss[i, :]])
+            pm_out = np.vstack([pm_out, pm[i, :]])
+    uwish2_out = np.delete(uwish2_out, 0, 0)
+    ukidss_out = np.delete(ukidss_out, 0, 0)
+    pm_out = np.delete(pm_out, 0, 0)
+    # Calculate the sigma detection levels
     sigma_lev1 = plt.Circle((0, 0), 1 * pm_mag_std_dev, color="r", fill=False)
     sigma_lev2 = plt.Circle((0, 0), 2 * pm_mag_std_dev, color="r", fill=False)
     sigma_lev3 = plt.Circle((0, 0), 3 * pm_mag_std_dev, color="r", fill=False)
     sigma_lev4 = plt.Circle((0, 0), 4 * pm_mag_std_dev, color="r", fill=False)
     sigma_lev5 = plt.Circle((0, 0), 5 * pm_mag_std_dev, color="r", fill=False)
+    # Plot the output
     fig = plt.figure()
     ax = fig.add_subplot(111)
     ax.plot(pm[np.where(uwish2[:, 0] != cand_coords[0]), 0],
@@ -270,22 +300,43 @@ def output_PM(uwish2, ukidss, pm, cand_coords, epochs):
                                   ukidss[i, 7], ukidss[i, 8], ukidss[i, 9],
                                   pm[i, 0], pm[i, 1], pm[i, 2]))
     output_file.close()
+    # Output the outliers to file
+    output_file = open("({})({})_outliers.txt".format(cand_coords[0],
+                       cand_coords[1]), "w")
+    output_file.write("UWISH2\t{}\tUKIDSS\t{}\n".format(epochs[0], epochs[1]))
+    output_file.write("CAND_RA\t{}\tCAND_DEC\t{}\n".format(cand_coords[0],
+                      cand_coords[1]))
+    output_file.write("UWISH2_RA\tUWISH2_DEC\tUWISH2_DIST\tUWISH2_H2"
+                      "\tUKIDSS_RA\tUKIDSS_DEC\tUKIDSS_DIST\tUKIDSS_J"
+                      "\tUKIDSS_J_ERR\tUKIDSS_H\tUKIDSS_H_ERR\tUKIDSS_K"
+                      "\tUKIDSS_K_ERR\tPM_RA\tPM_DEC\tPM_MAG\n")
+    for i in range(uwish2_out.shape[0]):
+        output_file.write("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}"
+                          "\t{}\t{}\t{}\t{}\n"
+                          .format(uwish2_out[i, 0], uwish2_out[i, 1],
+                                  uwish2_out[i, 2], uwish2_out[i, 3],
+                                  ukidss_out[i, 0], ukidss_out[i, 1],
+                                  ukidss_out[i, 2], ukidss_out[i, 3],
+                                  ukidss_out[i, 4], ukidss_out[i, 5],
+                                  ukidss_out[i, 6], ukidss_out[i, 7],
+                                  ukidss_out[i, 8], ukidss_out[i, 9],
+                                  pm_out[i, 0], pm_out[i, 1], pm_out[i, 2]))
+    output_file.close()
     return
 
 
-def restart(work_dir=True):
+def restart(work_dir):
     """
     """
-    exit_flag = False
-    while exit_flag is False:
-        restart = input("Restart program? [Y/N]\n> ")
+    restart_flag = input("\nRestart program? [Y/N]\n> ")
+    if restart_flag == "Y":
         print("")
-        if restart == "Y":
-            main(work_dir)
-        elif restart == "N":
-            exit_flag = True
-        else:
-            print("Unknown input. Try 'Y or 'N'.")
+        main(work_dir)
+    elif restart_flag == "N":
+        exit()
+    else:
+        print("Unknown input. Try 'Y or 'N'.")
+        restart(work_dir)
     return
 
 
@@ -305,11 +356,13 @@ def main(work_dir=True):
                                          ukidss_skip)
     # Match the sources between the two data sets
     uwish2_data, ukidss_data, cand_coords = source_match(uwish2_data,
-                                                         ukidss_data)
+                                                         ukidss_data, work_dir)
     # Calculate the proper motions
-    uwish2_data, ukidss_data, pm, epochs = calc_PM(uwish2_data, ukidss_data)
+    uwish2_data, ukidss_data, pm, pm_mag_err, epochs = \
+        calc_PM(uwish2_data, ukidss_data, True)
     # Plot the data and output to file
-    output_PM(uwish2_data, ukidss_data, pm, cand_coords, epochs)
+    output_PM(uwish2_data, ukidss_data, pm, pm_mag_err, cand_coords, epochs)
+    # Allows the user to restart the program from the beginning
     restart(work_dir)
     return
 
